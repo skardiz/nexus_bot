@@ -1,0 +1,10 @@
+# Файл с секретными ключами
+.env
+
+# Файл базы данных
+voice_stats.db
+voice_stats.db-journal
+
+# Системные файлы Python
+__pycache__/
+*.pyc

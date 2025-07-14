@@ -1,0 +1,12 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  discord-telegram-bot:
+    build: .
+    container_name: discord_notifier
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./:/app

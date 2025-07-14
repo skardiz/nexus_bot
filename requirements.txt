@@ -1,0 +1,6 @@
+# requirements.txt (Correct Final Version)
+discord.py==2.3.2
+python-dotenv==1.0.0
+python-telegram-bot[ext]==21.1.1
+requests==2.32.3
+psutil==5.9.8
