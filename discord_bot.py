@@ -1,4 +1,4 @@
-# discord_bot.py (The Absolute Final, "VIP /up Command" Version)
+# discord_bot.py
 import os
 import discord
 from discord import app_commands
@@ -8,157 +8,192 @@ from collections import defaultdict
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
+import random
+import string
 
 import database
 import utils
 import config
 
-# --- Глобальные переменные и настройка ---
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-intents = discord.Intents.all()
+intents = discord.Intents.default()
+intents.voice_states = True
+intents.presences = True
+intents.members = True
+
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 
 voice_users, telegram_message_info = {}, {"message_id": None}
 active_channel_link, last_voice_session_end_time = None, None
+coming_soon_users = {}
 
-# --- Основная логика ---
+@tree.command(name="link", description="Привязать ваш Steam и Telegram аккаунты.")
+@app_commands.describe(steam_id="Ваш уникальный SteamID64 (можно найти на steamid.io)")
+async def link_command(interaction: discord.Interaction, steam_id: str):
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    code_formatted = f"{code[:3]}-{code[3:]}"
+    database.link_steam_account(interaction.user.id, steam_id)
+    database.create_linking_code(code_formatted, interaction.user.id)
+    try:
+        await interaction.user.send(
+            f"👋 Привет! Ваш Steam-аккаунт `{steam_id}` успешно привязан.\n\n"
+            f"Теперь, чтобы связать Telegram, отправьте боту в Telegram команду `/confirm` с этим кодом:\n\n"
+            f"**{code_formatted}**\n\nКод действителен 5 минут."
+        )
+        await interaction.response.send_message("✅ Я отправил вам в личные сообщения код для привязки Telegram.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ Не могу отправить ЛС. Разрешите прием сообщений в настройках приватности.", ephemeral=True)
+
+def add_coming_soon_user(user_id, user_name):
+    if user_id in voice_users: return
+    print(f"INFO: Пользователь {user_name} ({user_id}) добавлен в список 'Скоро зайду'.")
+    expiration_time = datetime.now(utils.MOSCOW_TZ) + timedelta(minutes=30)
+    coming_soon_users[user_id] = {"name": user_name, "expires_at": expiration_time}
+
 async def repost_message():
     global telegram_message_info
     if telegram_message_info.get("message_id"):
-        try:
-            await telegram_bot.delete_message(TELEGRAM_CHAT_ID, telegram_message_info["message_id"])
-            database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
-        except BadRequest:
-            pass
+        try: await telegram_bot.delete_message(TELEGRAM_CHAT_ID, telegram_message_info["message_id"])
+        except BadRequest: pass
     telegram_message_info["message_id"] = None
-    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Вызываем с "VIP-пропуском"
     await send_or_edit_message(force_creation=True)
 
 async def format_telegram_message():
+    global coming_soon_users
     now = datetime.now(utils.MOSCOW_TZ)
     lines = ["🎧 **Сейчас в голосовом чате:**"] if voice_users else ["🎤 **В голосовых каналах сейчас пусто.**"]
+    
     for uid, data in sorted(voice_users.items(), key=lambda i: i[1]['join_time']):
+        coming_soon_users.pop(uid, None)
         tg_id = database.get_telegram_id_by_discord_id(uid)
-        link = f"[{data['name']}](tg://user?id={tg_id})" if tg_id else data['name']
+        link = f"[{utils.escape_markdown(data['name'])}](tg://user?id={tg_id})" if tg_id else utils.escape_markdown(data['name'])
         dur = utils.format_duration((now - data['join_time']).total_seconds())
         stat = "".join([" 🎥" if data.get('video') else "", " 🔴" if data.get('streaming') else ""])
         game = data.get('game', 'Неизвестно')
         game_url = utils.get_steam_app_url(game)
-        game_str = f" (играет в [{game}]({game_url}))" if game_url else (f" (играет в *{game}*)" if game != "Неизвестно" else "")
+        game_str = f" (играет в [{utils.escape_markdown(game)}]({game_url}))" if game_url else (f" (играет в *{utils.escape_markdown(game)}*)" if game != "Неизвестно" else "")
         lines.append(f"• {link}{stat} - {dur}{game_str}")
-    lines.append("")
-    today_stats = [s for s in database.get_daily_stats(utils.get_day_start_time()) if s[0] not in voice_users]
-    if today_stats:
-        lines.append("🗓 **Были сегодня:**")
-        for uid, name, secs in today_stats:
+    
+    if voice_users: lines.append("")
+    
+    expired_users = [uid for uid, data in coming_soon_users.items() if now > data['expires_at']]
+    for uid in expired_users:
+        print(f"INFO: Пользователь {coming_soon_users[uid]['name']} удален из 'Скоро зайду' по тайм-ауту.")
+        del coming_soon_users[uid]
+        
+    if coming_soon_users:
+        lines.append("🚶‍♂️ **Скоро зайдет:**")
+        for uid, data in coming_soon_users.items():
             tg_id = database.get_telegram_id_by_discord_id(uid)
-            link = f"[{name}](tg://user?id={tg_id})" if tg_id else name
+            link = f"[{utils.escape_markdown(data['name'])}](tg://user?id={tg_id})" if tg_id else utils.escape_markdown(data['name'])
+            lines.append(f"• {link}")
+        lines.append("")
+
+    today_stats = database.get_daily_stats(utils.get_day_start_time())
+    users_in_voice_ids = set(voice_users.keys())
+    filtered_today_stats = [s for s in today_stats if s[0] not in users_in_voice_ids]
+
+    if filtered_today_stats:
+        lines.append("🗓 **Были сегодня:**")
+        for uid, name, secs in filtered_today_stats:
+            tg_id = database.get_telegram_id_by_discord_id(uid)
+            link = f"[{utils.escape_markdown(name)}](tg://user?id={tg_id})" if tg_id else utils.escape_markdown(name)
             lines.append(f"• {link} - {utils.format_duration(secs)}")
-    return "\n".join(lines)
+            
+    return "\n".join(lines).strip()
 
 async def send_or_edit_message(text_override=None, mode="main", force_creation=False):
-    global telegram_message_info, active_channel_link
+    global telegram_message_info
     database.set_key_value('voice_users_count', len(voice_users))
     
-    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Проверяем "VIP-пропуск"
     is_new_message_needed = not telegram_message_info.get("message_id")
     if is_new_message_needed and utils.is_quiet_hours() and not force_creation and not text_override and mode == "main":
         print("INFO: Тихие часы. Создание нового сообщения подавлено.")
         return
 
     keyboard = []
-    if mode == "daily_stats":
+    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Строгая логика ОДНОЙ кнопки
+    if mode == "main":
+        if voice_users: # Кнопка есть ТОЛЬКО если кто-то в войсе
+            keyboard.append([InlineKeyboardButton("🚶‍♂️ Скоро зайду", callback_data='coming_soon')])
+
+    elif mode == "daily_stats":
         keyboard.append([InlineKeyboardButton("⬅️ Назад к мониторингу", callback_data='back_to_main')])
         day_start = utils.get_day_start_time()
         sessions = database.get_detailed_daily_sessions(day_start)
         if not sessions:
             text_override = "📊 **За сегодня еще не было активности.**"
         else:
+            # Логика детальной статистики
             user_stats = defaultdict(lambda: {'total_seconds': 0, 'sessions': [], 'games': defaultdict(int), 'telegram_id': None})
             for user_id, name, telegram_id, start_str, duration, game in sessions:
-                user_stats[name]['user_id'] = user_id
-                user_stats[name]['telegram_id'] = telegram_id
+                user_stats[name].update({'user_id': user_id, 'telegram_id': telegram_id})
                 user_stats[name]['total_seconds'] += duration
                 if duration >= 900:
                     start_time = datetime.fromisoformat(start_str)
-                    end_time = start_time + timedelta(seconds=duration)
-                    user_stats[name]['sessions'].append(f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}")
+                    user_stats[name]['sessions'].append(f"{start_time.strftime('%H:%M')}-{(start_time + timedelta(seconds=duration)).strftime('%H:%M')}")
                 if game and game != "Неизвестно":
                     user_stats[name]['games'][game] += duration
             
             lines = ["📊 **Статистика за сегодня:**\n"]
             for name, data in user_stats.items():
-                name_link = f"[{name}](tg://user?id={data['telegram_id']})" if data['telegram_id'] else name
+                name_link = f"[{utils.escape_markdown(name)}](tg://user?id={data['telegram_id']})" if data['telegram_id'] else utils.escape_markdown(name)
                 lines.append(f"👤 {name_link}")
                 lines.append(f"   - *Всего в войсе:* {utils.format_duration(data['total_seconds'])}")
-                if data['sessions']:
-                    lines.append(f"   - *Интервалы (МСК):* {', '.join(data['sessions'])}")
+                if data['sessions']: lines.append(f"   - *Интервалы (МСК):* {', '.join(data['sessions'])}")
                 top_games = sorted(data['games'].items(), key=lambda item: item[1], reverse=True)
                 if top_games:
-                    games_with_links = []
-                    for game, time in top_games:
-                        url = utils.get_steam_app_url(game)
-                        game_link = f"[{game}]({url})" if url else game
-                        games_with_links.append(f"{game_link} ({utils.format_duration(time)})")
-                    games_str = ', '.join(games_with_links)
+                    games_str = ', '.join([f"[{utils.escape_markdown(g)}]({utils.get_steam_app_url(g)})" if utils.get_steam_app_url(g) else utils.escape_markdown(g) + f" ({utils.format_duration(t)})" for g, t in top_games])
                     lines.append(f"   - *Играл в:* {games_str}")
                 lines.append("")
-            text_override = "\n".join(lines)
-    else:
-        if voice_users and active_channel_link:
-            keyboard.append([InlineKeyboardButton("🚀 Присоединиться к войсу", url=active_channel_link, callback_data='refresh')])
-        elif database.get_daily_stats(utils.get_day_start_time()):
-            keyboard.append([InlineKeyboardButton("📊 Статистика дня", callback_data='daily_stats')])
-        else:
-            keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data='refresh')])
+            text_override = "\n".join(lines).strip()
+            
+    is_fully_inactive = not voice_users and not database.get_daily_stats(utils.get_day_start_time()) and not coming_soon_users
+    if is_fully_inactive and mode == "main":
+        if telegram_message_info.get("message_id"):
+            print("INFO: Сервер неактивен, удаляю старое сообщение.")
+            try: await telegram_bot.delete_message(TELEGRAM_CHAT_ID, telegram_message_info["message_id"])
+            except BadRequest: pass
+            telegram_message_info["message_id"] = None
+        return
 
     text = text_override or await format_telegram_message()
-    markup = InlineKeyboardMarkup(keyboard)
+    markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
     try:
-        if not voice_users and not database.get_daily_stats(utils.get_day_start_time()) and mode == "main":
-            if telegram_message_info.get("message_id"):
-                try:
-                    await telegram_bot.delete_message(TELEGRAM_CHAT_ID, telegram_message_info["message_id"])
-                    database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
-                except BadRequest: pass
-                telegram_message_info["message_id"] = None
-            return
         if not telegram_message_info.get("message_id"):
             msg = await telegram_bot.send_message(TELEGRAM_CHAT_ID, text, ParseMode.MARKDOWN, reply_markup=markup, disable_notification=True, disable_web_page_preview=True)
-            database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
             telegram_message_info["message_id"] = msg.message_id
         else:
             await telegram_bot.edit_message_text(text, TELEGRAM_CHAT_ID, telegram_message_info["message_id"], parse_mode=ParseMode.MARKDOWN, reply_markup=markup, disable_web_page_preview=True)
-            database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
+        database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
     except BadRequest as e:
-        if "message is not modified" in str(e).lower():
-             database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
-        else:
+        if "message is not modified" not in str(e).lower():
+            print(f"ERROR: Ошибка BadRequest при отправке сообщения: {e}")
             telegram_message_info["message_id"] = None
-            await send_or_edit_message(text, mode=mode)
-    except Exception as e: print(f"КРИТИЧЕСКАЯ ОШИБКА отправки: {e}")
+            await asyncio.sleep(1)
+            await send_or_edit_message(text, mode=mode, force_creation=True)
+    except Exception as e:
+        print(f"КРИТИЧЕСКАЯ ОШИБКА отправки: {e}")
+        telegram_message_info["message_id"] = None
 
 async def check_achievements(uid, name):
     stats = database.get_user_stats(uid)
     if not stats: return
-    current_total_seconds = stats[0]
     for required_seconds, achievement_name in config.ACHIEVEMENTS.items():
-        if current_total_seconds >= required_seconds:
-            if database.grant_achievement(uid, achievement_name):
-                print(f"INFO: Выдана новая ачивка '{achievement_name}' пользователю {name}")
-                await telegram_bot.send_message(
-                    TELEGRAM_CHAT_ID,
-                    f"🎉 **Новое достижение!**\nПользователь **{name}** открыл ачивку: **{achievement_name}**",
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True
-                )
-                database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
+        if stats[0] >= required_seconds and database.grant_achievement(uid, achievement_name):
+            print(f"INFO: Выдана новая ачивка '{achievement_name}' пользователю {name}")
+            await telegram_bot.send_message(
+                TELEGRAM_CHAT_ID,
+                f"🎉 **Новое достижение!**\nПользователь **{utils.escape_markdown(name)}** открыл ачивку: **{achievement_name}**",
+                parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
+            )
+            database.set_key_value('last_telegram_success', datetime.now(utils.MOSCOW_TZ).isoformat())
 
 async def update_user_status(member) -> bool:
     if member.id not in voice_users: return False
@@ -175,15 +210,6 @@ async def update_user_status(member) -> bool:
     }
     voice_users[member.id].update(new_status)
     return any(old_status[key] != new_status.get(key) for key in old_status)
-
-async def rescan_all_voice_users():
-    print("--- Failsafe: Запускаю пересканирование... ---")
-    database.set_key_value('last_discord_success', datetime.now(utils.MOSCOW_TZ).isoformat())
-    for uid in list(voice_users.keys()):
-        member = next((g.get_member(uid) for g in client.guilds), None)
-        if member and member.voice: await update_user_status(member)
-        else: voice_users.pop(uid, None)
-    await send_or_edit_message(force_creation=True)
 
 @client.event
 async def on_ready():
@@ -203,7 +229,7 @@ async def on_ready():
             voice_users[user_id] = {"name": member.display_name, "join_time": join_time}
             await update_user_status(member)
         else:
-            print(f"INFO: Пользователь {user_id} вышел, пока бот был оффлайн. Завершаю сессию.")
+            print(f"INFO: Пользователь {user_id} вышел, пока бот был оффлайн.")
             ended_session_join_time = database.end_active_session(user_id)
             if ended_session_join_time:
                 duration = (datetime.now(utils.MOSCOW_TZ) - ended_session_join_time).total_seconds()
@@ -211,7 +237,7 @@ async def on_ready():
 
     for member_id, member in all_voice_members.items():
         if member_id not in voice_users:
-            print(f"INFO: Пользователь {member.display_name} зашел, пока бот был оффлайн. Начинаю новую сессию.")
+            print(f"INFO: Пользователь {member.display_name} зашел, пока бот был оффлайн.")
             now = datetime.now(utils.MOSCOW_TZ)
             voice_users[member_id] = {"name": member.display_name, "join_time": now}
             database.start_active_session(member_id, now)
@@ -220,12 +246,11 @@ async def on_ready():
     active_channel_link = None
     if voice_users:
         first_user_id = next(iter(voice_users))
-        member = all_voice_members.get(first_user_id)
-        if member and member.voice:
-             active_channel_link = f"https://discord.com/channels/{member.guild.id}/{member.voice.channel.id}"
+        if all_voice_members.get(first_user_id) and all_voice_members[first_user_id].voice:
+             active_channel_link = f"https://discord.com/channels/{all_voice_members[first_user_id].guild.id}/{all_voice_members[first_user_id].voice.channel.id}"
 
     print(f"✅ Состояние восстановлено. В войсе: {len(voice_users)} пользователей.")
-    await send_or_edit_message()
+    await send_or_edit_message(force_creation=True)
     client.loop.create_task(periodic_updater())
 
 @client.event
@@ -240,7 +265,20 @@ async def on_voice_state_update(member, before, after):
         database.start_active_session(member.id, now)
         voice_users[member.id] = {"name": member.display_name, "join_time": now}
         await update_user_status(member)
-        active_channel_link = f"https://discord.com/channels/{member.guild.id}/{after.channel.id}"
+        if len(voice_users) == 1:
+            active_channel_link = f"https://discord.com/channels/{member.guild.id}/{after.channel.id}"
+            
+        current_voice_count = len(voice_users)
+        if config.MENTION_THRESHOLD > 0 and current_voice_count == config.MENTION_THRESHOLD:
+            print(f"INFO: Порог в {config.MENTION_THRESHOLD} участников достигнут. Отправляю упоминание.")
+            mention_text = f"🗣️ В голосом чате компания! {config.MENTIONS}"
+            try:
+                await telegram_bot.send_message(
+                    TELEGRAM_CHAT_ID, text=mention_text, disable_notification=False
+                )
+            except Exception as e:
+                print(f"ERROR: Не удалось отправить упоминание: {e}")
+                
         await send_or_edit_message()
 
     elif before.channel and not after.channel:
@@ -260,23 +298,25 @@ async def on_voice_state_update(member, before, after):
             active_channel_link = None
         await send_or_edit_message()
     
-    else:
-        if await update_user_status(member):
+    elif before.channel and after.channel and before.channel != after.channel:
+        if len(voice_users) == 1:
+            active_channel_link = f"https://discord.com/channels/{member.guild.id}/{after.channel.id}"
             await send_or_edit_message()
 
 @client.event
 async def on_presence_update(before, after):
-    database.set_key_value('last_discord_success', datetime.now(utils.MOSCOW_TZ).isoformat())
     if after.id in voice_users and await update_user_status(after):
         await send_or_edit_message()
 
 async def periodic_updater():
     while True:
-        await asyncio.sleep(300)
-        if voice_users:
-            await send_or_edit_message()
+        await asyncio.sleep(60)
+        await send_or_edit_message()
 
 async def run():
     print("--- Запуск Discord бота... ---")
     database.set_key_value('start_time', datetime.now(utils.MOSCOW_TZ).isoformat())
-    await client.start(DISCORD_TOKEN)
+    try:
+        await client.start(DISCORD_TOKEN)
+    finally:
+        await client.close()

@@ -1,21 +1,19 @@
-# utils.py (The Absolute Final, "Disk Cache" Version)
+# utils.py
 import os
 import requests
 from datetime import datetime, timezone, timedelta
 import re
-import config
 import urllib.parse
 import time
 import database
+import config
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
 STEAM_API_KEY = os.getenv('STEAM_API_KEY')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 
 async def fetch_steam_app_list_to_db():
-    """Скачивает и кэширует список игр в БД, если он устарел."""
     last_updated = database.get_cache_last_updated('steam_apps')
-    # Обновляем, если данных нет или они старше 7 дней
     if not last_updated or (datetime.now() - last_updated) > timedelta(days=7):
         print("INFO: Кэш игр Steam устарел или отсутствует. Обновляю...")
         try:
@@ -23,7 +21,6 @@ async def fetch_steam_app_list_to_db():
             response = requests.get(url, timeout=15).json()
             apps = response.get('applist', {}).get('apps', [])
             if apps:
-                # Готовим данные для массовой вставки
                 app_data = [(app['appid'], app['name']) for app in apps]
                 database.update_steam_apps(app_data)
                 database.set_cache_last_updated('steam_apps')
@@ -32,24 +29,18 @@ async def fetch_steam_app_list_to_db():
     else:
         print("INFO: Кэш игр Steam актуален. Пропускаю обновление.")
 
-
 def get_steam_app_url(game_name):
-    """Возвращает прямую ссылку на игру, используя кэш в БД."""
     if not game_name or game_name == "Неизвестно":
         return None
-    
     appid = database.get_steam_app_id(game_name)
-    if appid:
-        return f"https://store.steampowered.com/app/{appid}/"
-    return None
+    return f"https://store.steampowered.com/app/{appid}/" if appid else None
 
 async def measure_telegram_ping():
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getMe"
     start_time = time.monotonic()
     try:
         requests.get(url, timeout=5)
-        end_time = time.monotonic()
-        return (end_time - start_time) * 1000
+        return (time.monotonic() - start_time) * 1000
     except requests.RequestException:
         return -1
 
@@ -58,8 +49,7 @@ async def measure_steam_ping():
     start_time = time.monotonic()
     try:
         requests.get(url, timeout=5)
-        end_time = time.monotonic()
-        return (end_time - start_time) * 1000
+        return (time.monotonic() - start_time) * 1000
     except requests.RequestException:
         return -1
 
@@ -70,27 +60,21 @@ def format_duration(seconds):
     seconds = int(seconds)
     if seconds < 60:
         return "меньше минуты"
-    
     days, remainder = divmod(seconds, 86400)
     hours, remainder = divmod(remainder, 3600)
     minutes, _ = divmod(remainder, 60)
-    
     parts = []
     if days > 0: parts.append(f"{days} д")
     if hours > 0: parts.append(f"{hours} ч")
     if minutes > 0: parts.append(f"{minutes} мин")
-        
     return " ".join(parts) if parts else "меньше минуты"
 
 def is_quiet_hours():
-    if not hasattr(config, 'QUIET_HOURS_ENABLED') or not config.QUIET_HOURS_ENABLED:
+    if not config.QUIET_HOURS_ENABLED:
         return False
     now_hour = datetime.now(MOSCOW_TZ).hour
     start, end = config.QUIET_HOURS["start"], config.QUIET_HOURS["end"]
-    if start < end:
-        return start <= now_hour < end
-    else: 
-        return now_hour >= start or now_hour < end
+    return start <= now_hour < end if start < end else now_hour >= start or now_hour < end
 
 def get_game_from_steam(steam_id):
     if not steam_id or not STEAM_API_KEY: return None

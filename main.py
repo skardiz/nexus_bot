@@ -1,29 +1,48 @@
-# main.py (The Absolute Final & Unified Architecture)
+# main.py
 import asyncio
-from dotenv import load_dotenv
-from collections import defaultdict
+import logging
+import os
+from logging.handlers import RotatingFileHandler
 
-# Эта команда должна быть вызвана самой первой
-load_dotenv()
-
-# Теперь импортируем наши модули
 import database
 import discord_bot
 import telegram_bot
+import utils
+
+def setup_logging():
+    """Настраивает логирование в консоль и в файл."""
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+        
+    log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    
+    log_handler = RotatingFileHandler('logs/bot.log', maxBytes=5*1024*1024, backupCount=2, encoding='utf-8')
+    log_handler.setFormatter(log_formatter)
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(log_handler)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(log_formatter)
+    root_logger.addHandler(console_handler)
+
+    def log_print(*args, **kwargs):
+        logging.info(' '.join(map(str, args)))
+    
+    __builtins__.print = log_print
 
 async def main():
-    """Инициализирует и запускает ботов в едином асинхронном потоке."""
-    print("--- [v.Final.Unified] Инициализация систем ---")
+    """Главная асинхронная функция для запуска всех систем."""
+    print("--- [Nexus Bot v1.0] Инициализация систем ---")
+    
     database.init_db()
-
-    # Запускаем все вместе в едином потоке
+    
     await asyncio.gather(
         discord_bot.run(),
         telegram_bot.run()
     )
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n--- Завершение работы... ---")
+    setup_logging()
+    asyncio.run(main())

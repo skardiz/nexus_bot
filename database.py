@@ -1,11 +1,10 @@
-# database.py (The Absolute Final, "Persistent Memory" Version)
+# database.py
 import sqlite3
 from datetime import datetime, timedelta
 
 DB_FILE = "voice_stats.db"
 
 def query(sql, params=(), fetchone=False, commit=False):
-    """Универсальная функция для выполнения SQL-запросов."""
     with sqlite3.connect(DB_FILE) as conn:
         conn.cursor().execute("PRAGMA foreign_keys = ON;")
         cursor = conn.cursor()
@@ -21,7 +20,6 @@ def query(sql, params=(), fetchone=False, commit=False):
         return None, rowcount
 
 def init_db():
-    """Инициализирует все таблицы в базе данных."""
     _execute_query('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, total_seconds INTEGER DEFAULT 0, steam_id TEXT, telegram_id INTEGER)')
     _execute_query('CREATE TABLE IF NOT EXISTS games (name TEXT PRIMARY KEY, total_seconds INTEGER DEFAULT 0)')
     _execute_query('CREATE TABLE IF NOT EXISTS achievements (user_id INTEGER, achievement TEXT, UNIQUE(user_id, achievement))')
@@ -31,13 +29,7 @@ def init_db():
     _execute_query('CREATE TABLE IF NOT EXISTS steam_apps (appid INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE)')
     _execute_query('CREATE INDEX IF NOT EXISTS idx_steam_apps_name ON steam_apps(name)')
     _execute_query('CREATE TABLE IF NOT EXISTS cache_info (key TEXT PRIMARY KEY, last_updated TIMESTAMP)')
-    # Таблица для хранения активных сессий для защиты от перезапусков
-    _execute_query("""
-        CREATE TABLE IF NOT EXISTS active_sessions (
-            user_id INTEGER PRIMARY KEY,
-            join_time TIMESTAMP NOT NULL
-        )
-    """)
+    _execute_query('CREATE TABLE IF NOT EXISTS active_sessions (user_id INTEGER PRIMARY KEY, join_time TIMESTAMP NOT NULL)')
     try:
         _execute_query('SELECT game_name FROM voice_sessions LIMIT 1')
     except sqlite3.OperationalError:
@@ -45,17 +37,14 @@ def init_db():
     print("    -> База данных (v.PersistentMemory) инициализирована.")
 
 def _execute_query(sql, params=()):
-    """Простая внутренняя функция для выполнения запросов с коммитом."""
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(sql, params)
         conn.commit()
 
 def start_active_session(user_id, join_time):
-    """Начинает новую активную сессию в БД."""
     query("INSERT OR REPLACE INTO active_sessions (user_id, join_time) VALUES (?, ?)", (user_id, join_time.isoformat()), commit=True)
 
 def end_active_session(user_id):
-    """Удаляет активную сессию из БД и возвращает время начала."""
     result, _ = query("SELECT join_time FROM active_sessions WHERE user_id = ?", (user_id,), fetchone=True)
     if result:
         query("DELETE FROM active_sessions WHERE user_id = ?", (user_id,), commit=True)
@@ -63,7 +52,6 @@ def end_active_session(user_id):
     return None
 
 def get_all_active_sessions():
-    """Возвращает все активные сессии из БД для восстановления состояния."""
     results, _ = query("SELECT user_id, join_time FROM active_sessions")
     return [(uid, datetime.fromisoformat(jt)) for uid, jt in results]
 
