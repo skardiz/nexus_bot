@@ -1,4 +1,4 @@
-version: '3.8'
+# docker-compose.yml (исправленная версия)
 
 services:
   discord-telegram-bot:
@@ -8,11 +8,12 @@ services:
     env_file:
       - .env
     volumes:
-      # Том для хранения базы данных
-      - db_data:/app/voice_stats.db
-      # Папка для логов на вашем компьютере
+      # Монтируем именованный том в папку /app/data
+      # Теперь бот сможет создать и использовать voice_stats.db внутри этой папки
+      - db_data:/app/data
+      # Монтируем папку логов, как и раньше
       - ./logs:/app/logs
 
 volumes:
-  # Объявление именованного тома
+  # Объявляем именованный том для данных
   db_data:
